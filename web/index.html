@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#121212">
+<title>ComfyUI Mobile</title>
+<link rel="stylesheet" href="/mobileui/static/style.css">
+</head>
+<body>
+<header>
+  <select id="workflow-select" aria-label="工作流"></select>
+</header>
+
+<main>
+  <form id="params-form" onsubmit="return false">
+    <div id="prompt-params"></div>
+    <div id="common-params" class="grid"></div>
+    <details id="other-params" hidden>
+      <summary>其他参数</summary>
+      <div id="other-params-body" class="grid"></div>
+    </details>
+  </form>
+
+  <div id="status"></div>
+  <div id="progress" hidden><div id="progress-bar"></div></div>
+  <div id="result"></div>
+</main>
+
+<footer>
+  <button id="run-btn" type="button" disabled>生成</button>
+</footer>
+
+<script src="/mobileui/static/app.js"></script>
+</body>
+</html>
