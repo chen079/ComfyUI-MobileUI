@@ -1,16 +1,12 @@
-import glob
 import json
 import os
 
 from aiohttp import web
 from server import PromptServer  # type: ignore
 
-import nodes
-from comfy_api.internal import _ComfyNodeInternal
+from .convert import input_schema, schema_inputs, workflow_to_prompt
 
-PLUGIN_DIR = os.path.dirname(__file__)
-WORKFLOWS_DIR = os.path.join(PLUGIN_DIR, "workflows")
-WEB_DIR = os.path.join(PLUGIN_DIR, "web")
+WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
 COMMON_PARAMS = {
     "seed", "noise_seed", "steps", "cfg", "sampler_name", "scheduler",
@@ -18,111 +14,109 @@ COMMON_PARAMS = {
 }
 
 
-def _list_workflows():
+def _workflows_dir(request):
+    return PromptServer.instance.user_manager.get_request_user_filepath(request, "workflows", create_dir=False)
+
+
+def _list_workflows(root):
     out = []
-    for path in sorted(glob.glob(os.path.join(WORKFLOWS_DIR, "*.json"))):
-        name = os.path.splitext(os.path.basename(path))[0]
-        out.append({"id": name, "name": name})
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for name in sorted(filenames, key=str.lower):
+            if not name.lower().endswith(".json"):
+                continue
+            path = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+            category, _, filename = path.rpartition("/")
+            out.append({
+                "path": path,
+                "name": filename[:-5],
+                "category": category,
+                "mtime": os.path.getmtime(os.path.join(dirpath, name)),
+            })
     return out
 
 
-def _load_workflow(workflow_id):
-    if not workflow_id or workflow_id != os.path.basename(workflow_id):
-        return None
-    path = os.path.abspath(os.path.join(WORKFLOWS_DIR, workflow_id + ".json"))
-    if os.path.commonpath((os.path.abspath(WORKFLOWS_DIR), path)) != os.path.abspath(WORKFLOWS_DIR):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    # Accept both the bare prompt graph and a full {"prompt": ...} request body.
-    if isinstance(data, dict) and isinstance(data.get("prompt"), dict):
-        return data["prompt"]
-    if isinstance(data, dict):
-        return data
-    return None
+def _is_link(value):
+    return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
 
 
-def _input_schema(class_type):
-    cls = nodes.NODE_CLASS_MAPPINGS.get(class_type)
-    if cls is None:
-        return None
-    try:
-        if issubclass(cls, _ComfyNodeInternal):
-            return cls.GET_NODE_INFO_V1()["input"]
-        return cls.INPUT_TYPES()
-    except Exception:
-        return None
+def _prompt_roles(prompt, schemas):
+    # Follow each sampler's positive/negative input upstream to the first node that
+    # holds the prompt text as a multiline string widget.
+    roles = {}
+    for node in prompt.values():
+        for role in ("positive", "negative"):
+            link = node["inputs"].get(role)
+            if not _is_link(link):
+                continue
+            queue, seen = [link[0]], set()
+            while queue:
+                node_id = queue.pop(0)
+                if node_id in seen or node_id not in prompt:
+                    continue
+                seen.add(node_id)
+                inputs = prompt[node_id]["inputs"]
+                schema = schemas.get(node_id) or {}
+                text = next((n for n, v in inputs.items() if isinstance(v, str) and _extra(schema.get(n)).get("multiline")), None)
+                if text is not None:
+                    roles.setdefault((node_id, text), role)
+                    break
+                queue.extend(v[0] for v in inputs.values() if _is_link(v))
+    return roles
+
+
+def _extra(spec):
+    if isinstance(spec, (list, tuple)) and len(spec) > 1 and isinstance(spec[1], dict):
+        return spec[1]
+    return {}
 
 
 def _derive_widgets(prompt):
-    # Trace positive/negative links back to their text-encoding nodes so the
-    # prompt textareas can be labelled exactly.
-    roles = {}
-    for node in prompt.values():
-        if not isinstance(node, dict):
-            continue
-        for role in ("positive", "negative"):
-            link = node.get("inputs", {}).get(role)
-            if isinstance(link, list) and len(link) == 2 and isinstance(link[0], str):
-                roles[link[0]] = role
+    schemas = {}
+    for node_id, node in prompt.items():
+        schema = input_schema(node["class_type"])
+        if schema is not None:
+            schemas[node_id] = schema_inputs(schema)
+    roles = _prompt_roles(prompt, schemas)
 
     widgets = []
     for node_id, node in prompt.items():
-        if not isinstance(node, dict):
-            continue
-        class_type = node.get("class_type")
-        inputs = node.get("inputs", {})
-        schema = _input_schema(class_type)
+        schema = schemas.get(node_id)
         if schema is None:
             continue
-        title = node.get("_meta", {}).get("title") or class_type
+        for name, value in node["inputs"].items():
+            spec = schema.get(name)
+            if spec is None or _is_link(value):
+                continue
+            type_spec = spec[0] if isinstance(spec, (list, tuple)) and spec else None
+            extra = _extra(spec)
+            meta = {"node_id": node_id, "title": node["_meta"]["title"], "widget": name, "value": value}
+            if isinstance(type_spec, list):
+                meta["type"] = "combo"
+                meta["options"] = type_spec
+            elif type_spec == "COMBO":
+                meta["type"] = "combo"
+                meta["options"] = extra.get("options") or []
+            elif type_spec in ("INT", "FLOAT"):
+                meta["type"] = type_spec
+                for k in ("min", "max", "step"):
+                    if k in extra:
+                        meta[k] = extra[k]
+            elif type_spec == "STRING":
+                meta["type"] = "STRING"
+                meta["multiline"] = bool(extra.get("multiline"))
+            elif type_spec == "BOOLEAN":
+                meta["type"] = "BOOLEAN"
+            else:
+                continue
 
-        for section in ("required", "optional"):
-            declared = schema.get(section) or {}
-            for name, spec in declared.items():
-                if name not in inputs:
-                    continue
-                value = inputs[name]
-                if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
-                    continue  # link
-                type_spec = spec[0] if isinstance(spec, (list, tuple)) and spec else None
-                extra = spec[1] if isinstance(spec, (list, tuple)) and len(spec) > 1 else {}
-
-                meta = {
-                    "node_id": node_id,
-                    "title": title,
-                    "widget": name,
-                    "value": value,
-                }
-                if isinstance(type_spec, list):
-                    meta["type"] = "combo"
-                    meta["options"] = type_spec
-                elif type_spec == "COMBO":
-                    meta["type"] = "combo"
-                    meta["options"] = extra.get("options") or []
-                elif type_spec in ("INT", "FLOAT"):
-                    meta["type"] = type_spec
-                    for k in ("min", "max", "step"):
-                        if k in extra:
-                            meta[k] = extra[k]
-                elif type_spec == "STRING":
-                    meta["type"] = "STRING"
-                    meta["multiline"] = bool(extra.get("multiline"))
-                elif type_spec == "BOOLEAN":
-                    meta["type"] = "BOOLEAN"
-                else:
-                    continue
-
-                if name == "text" and node_id in roles:
-                    meta["group"] = roles[node_id]
-                elif name in COMMON_PARAMS:
-                    meta["group"] = "common"
-                else:
-                    meta["group"] = "other"
-                widgets.append(meta)
+            if (node_id, name) in roles:
+                meta["group"] = roles[(node_id, name)]
+            elif name in COMMON_PARAMS:
+                meta["group"] = "common"
+            else:
+                meta["group"] = "other"
+            widgets.append(meta)
     return widgets
 
 
@@ -131,28 +125,43 @@ def _add_routes():
 
     # Static files served outside WEB_DIRECTORY so the desktop editor never
     # auto-loads app.js as an extension script.
-    app.router.add_static('/mobileui/static', WEB_DIR)
+    app.router.add_static('/webui/static', WEB_DIR)
 
     async def serve_index(request):
         return web.FileResponse(os.path.join(WEB_DIR, "index.html"))
 
     async def api_list_workflows(request):
-        return web.json_response(_list_workflows())
+        root = _workflows_dir(request)
+        if root is None or not os.path.isdir(root):
+            return web.json_response([])
+        return web.json_response(_list_workflows(root))
 
     async def api_get_workflow(request):
-        prompt = _load_workflow(request.match_info.get("workflow_id", ""))
-        if prompt is None:
+        path = request.query.get("path", "")
+        if not path.lower().endswith(".json"):
             return web.json_response({"error": "workflow not found"}, status=404)
+        # get_request_user_filepath rejects paths that escape the user directory.
+        full = PromptServer.instance.user_manager.get_request_user_filepath(request, "workflows/" + path, create_dir=False)
+        if full is None or not os.path.isfile(full):
+            return web.json_response({"error": "workflow not found"}, status=404)
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                workflow = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            return web.json_response({"error": f"无法读取工作流：{e}"}, status=400)
+        if not isinstance(workflow, dict) or "nodes" not in workflow:
+            return web.json_response({"error": "不是界面格式的工作流文件"}, status=400)
+        prompt = workflow_to_prompt(workflow)
         return web.json_response({
-            "id": request.match_info["workflow_id"],
+            "path": path,
             "prompt": prompt,
             "widgets": _derive_widgets(prompt),
         })
 
     app.router.add_routes([
-        web.get('/mobileui', serve_index),
-        web.get('/mobileui/api/workflows', api_list_workflows),
-        web.get('/mobileui/api/workflows/{workflow_id}', api_get_workflow),
+        web.get('/webui', serve_index),
+        web.get('/webui/api/workflows', api_list_workflows),
+        web.get('/webui/api/workflow', api_get_workflow),
     ])
 
 

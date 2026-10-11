@@ -6,33 +6,57 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#121212">
-<title>ComfyUI Mobile</title>
-<link rel="stylesheet" href="/mobileui/static/style.css">
+<title>ComfyUI WebUI</title>
+<link rel="stylesheet" href="/webui/static/style.css">
 </head>
 <body>
 <header>
-  <select id="workflow-select" aria-label="工作流"></select>
+  <button id="workflow-btn" type="button" aria-haspopup="dialog">
+    <span id="workflow-category"></span>
+    <span id="workflow-name">选择工作流</span>
+    <span class="chevron" aria-hidden="true">▾</span>
+  </button>
 </header>
 
-<main>
-  <form id="params-form" onsubmit="return false">
-    <div id="prompt-params"></div>
-    <div id="common-params" class="grid"></div>
-    <details id="other-params" hidden>
-      <summary>其他参数</summary>
-      <div id="other-params-body" class="grid"></div>
-    </details>
-  </form>
+<div class="layout">
+  <section class="panel">
+    <form id="params-form" onsubmit="return false">
+      <div id="prompt-params"></div>
+      <div id="common-params" class="grid"></div>
+      <details id="other-params" hidden>
+        <summary>其他参数</summary>
+        <input id="other-filter" type="search" placeholder="筛选参数…" autocomplete="off">
+        <div id="other-params-body" class="grid"></div>
+      </details>
+    </form>
+    <div class="run-bar">
+      <button id="run-btn" type="button" disabled>生成</button>
+    </div>
+  </section>
 
-  <div id="status"></div>
-  <div id="progress" hidden><div id="progress-bar"></div></div>
-  <div id="result"></div>
-</main>
+  <section class="output" id="output">
+    <div id="status"></div>
+    <div id="progress" hidden><div id="progress-bar"></div></div>
+    <div id="preview" hidden></div>
+    <div id="result"></div>
+  </section>
+</div>
 
-<footer>
-  <button id="run-btn" type="button" disabled>生成</button>
-</footer>
+<div id="picker" class="sheet" role="dialog" aria-modal="true" aria-label="选择工作流" hidden>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <input id="picker-search" type="search" placeholder="搜索工作流…" autocomplete="off">
+      <button id="picker-close" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div id="picker-cats" class="chips"></div>
+    <ul id="picker-list"></ul>
+  </div>
+</div>
 
-<script src="/mobileui/static/app.js"></script>
+<div id="viewer" class="viewer" hidden>
+  <img id="viewer-img" alt="">
+</div>
+
+<script src="/webui/static/app.js"></script>
 </body>
 </html>

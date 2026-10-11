@@ -8,21 +8,24 @@ const LABELS = {
   width: "宽度", height: "高度", batch_size: "批次",
   ckpt_name: "模型", unet_name: "模型",
 };
+const STORE_NS = "comfywebui:";
 
-// crypto.randomUUID is unavailable on plain-HTTP LAN origins.
 const clientId = (crypto.randomUUID ? crypto.randomUUID() : Array.from({ length: 4 }, () => Math.random().toString(16).slice(2, 10)).join("")).replace(/-/g, "");
 
-const state = { workflow: null, promptId: null, running: false, previewUrl: null };
+const state = { workflow: null, promptId: null, running: false, previewUrl: null, workflows: [] };
 
+// ── Storage ────────────────────────────────────────────────────────────────
 function store(key, value) {
   try {
-    if (value === undefined) return JSON.parse(localStorage.getItem("mobileui:" + key));
-    localStorage.setItem("mobileui:" + key, JSON.stringify(value));
-  } catch (e) {
-    return null;
-  }
+    if (value === undefined) {
+      const raw = localStorage.getItem(STORE_NS + key);
+      return raw == null ? null : JSON.parse(raw);
+    }
+    localStorage.setItem(STORE_NS + key, JSON.stringify(value));
+  } catch (_) {}
 }
 
+// ── Status / progress ─────────────────────────────────────────────────────
 function setStatus(text, cls = "") {
   $("status").textContent = text;
   $("status").className = cls;
@@ -30,30 +33,19 @@ function setStatus(text, cls = "") {
 
 function setProgress(fraction) {
   $("progress").hidden = fraction === null;
-  $("progress-bar").style.width = ((fraction || 0) * 100).toFixed(1) + "%";
+  $("progress-bar").style.width = ((fraction ?? 0) * 100).toFixed(1) + "%";
 }
 
-function ctrlId(w) {
-  return "w-" + w.node_id + "-" + w.widget;
-}
-
-async function getJSON(url, options) {
-  const res = await fetch(url, options);
-  let body = null;
-  try { body = await res.json(); } catch (e) { /* non-JSON body */ }
-  return { ok: res.ok, status: res.status, body };
-}
-
-function randomSeed() {
-  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-}
+// ── Form control helpers ──────────────────────────────────────────────────
+function ctrlId(w) { return "w-" + w.node_id + "-" + w.widget; }
 
 function makeControl(w) {
   let el;
   if (w.type === "combo") {
     el = document.createElement("select");
-    const options = w.options.includes(w.value) ? w.options : [w.value, ...w.options];
-    for (const opt of options) {
+    const opts = Array.isArray(w.options) && w.options.length ? w.options : [w.value];
+    const have = opts.includes(w.value);
+    for (const opt of (have ? opts : [w.value, ...opts])) {
       const o = document.createElement("option");
       o.value = o.textContent = String(opt);
       el.appendChild(o);
@@ -67,7 +59,7 @@ function makeControl(w) {
     el.inputMode = w.type === "INT" ? "numeric" : "decimal";
     if (w.min !== undefined) el.min = w.min;
     if (w.max !== undefined && w.max <= Number.MAX_SAFE_INTEGER) el.max = w.max;
-    el.step = w.type === "INT" ? (w.step || 1) : "any";
+    el.step = w.type === "INT" ? (w.step ?? 1) : "any";
   } else if (w.multiline || w.group === "positive" || w.group === "negative") {
     el = document.createElement("textarea");
     el.rows = w.group === "negative" ? 3 : 5;
@@ -108,23 +100,16 @@ function makeField(w, label) {
 
   if (SEED_NAMES.has(w.widget) && w.type === "INT") {
     field.classList.add("wide");
-    const row = document.createElement("div");
-    row.className = "seed-row";
+    const row = document.createElement("div"); row.className = "seed-row";
     const dice = document.createElement("button");
-    dice.type = "button";
-    dice.textContent = "🎲";
-    dice.setAttribute("aria-label", "随机种子");
-    dice.onclick = () => { el.value = randomSeed(); saveForm(); };
+    dice.type = "button"; dice.textContent = "🎲"; dice.setAttribute("aria-label", "随机种子");
+    dice.onclick = () => { el.value = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER); saveForm(); };
     row.append(el, dice);
-
-    const rnd = document.createElement("label");
-    rnd.className = "seed-random";
+    const rndLabel = document.createElement("label"); rndLabel.className = "seed-random";
     const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.id = el.id + "-random";
-    cb.checked = true;
-    rnd.append(cb, "每次生成随机");
-    field.append(row, rnd);
+    cb.type = "checkbox"; cb.id = el.id + "-random"; cb.checked = true;
+    rndLabel.append(cb, "每次生成随机");
+    field.append(row, rndLabel);
     return field;
   }
 
@@ -133,45 +118,35 @@ function makeField(w, label) {
   return field;
 }
 
+// ── Form render ───────────────────────────────────────────────────────────
 function renderForm(wf) {
-  const promptBox = $("prompt-params");
-  const common = $("common-params");
-  const other = $("other-params-body");
-  promptBox.textContent = common.textContent = other.textContent = "";
+  $("prompt-params").textContent = "";
+  $("common-params").textContent = "";
+  $("other-params-body").textContent = "";
 
-  const saved = store("values:" + wf.id) || {};
-  const widgets = wf.widgets;
-  const groupOrder = { positive: 0, negative: 1 };
+  const saved = store("values:" + wf.path) ?? {};
 
-  widgets
-    .filter((w) => w.group === "positive" || w.group === "negative")
-    .sort((a, b) => groupOrder[a.group] - groupOrder[b.group])
-    .forEach((w) => {
-      const label = w.group === "positive" ? "正向提示词" : "负向提示词";
-      promptBox.appendChild(makeField(w, label));
-    });
-
-  const commonCount = {};
-  for (const w of widgets) if (w.group === "common") commonCount[w.widget] = (commonCount[w.widget] || 0) + 1;
-
-  for (const w of widgets) {
-    if (w.group === "common") {
-      let label = LABELS[w.widget] || w.widget;
-      if (commonCount[w.widget] > 1) label += " · " + w.title;
-      common.appendChild(makeField(w, label));
-    } else if (w.group === "other") {
-      other.appendChild(makeField(w, w.title + " · " + w.widget));
-    }
+  for (const w of wf.widgets) {
+    let target, label;
+    if (w.group === "positive") { target = $("prompt-params"); label = "正向提示词"; }
+    else if (w.group === "negative") { target = $("prompt-params"); label = "负向提示词"; }
+    else if (w.group === "common") { target = $("common-params"); label = LABELS[w.widget] ?? w.widget; }
+    else { target = $("other-params-body"); label = (w.title !== w.widget ? w.title + " · " : "") + w.widget; }
+    target.appendChild(makeField(w, label));
   }
-  $("other-params").hidden = !other.childElementCount;
 
-  for (const w of widgets) {
+  $("other-params").hidden = !$("other-params-body").childElementCount;
+
+  for (const w of wf.widgets) {
     const el = $(ctrlId(w));
+    if (!el) continue;
     const key = w.node_id + "/" + w.widget;
     setValue(el, w, key in saved ? saved[key] : w.value);
     const rnd = $(ctrlId(w) + "-random");
-    if (rnd && "random:" + key in saved) rnd.checked = saved["random:" + key];
+    if (rnd && ("random:" + key) in saved) rnd.checked = saved["random:" + key];
   }
+
+  applyOtherFilter();
 }
 
 function saveForm() {
@@ -179,65 +154,145 @@ function saveForm() {
   if (!wf) return;
   const values = {};
   for (const w of wf.widgets) {
-    const el = $(ctrlId(w));
-    if (!el) continue;
+    const el = $(ctrlId(w)); if (!el) continue;
     const key = w.node_id + "/" + w.widget;
     values[key] = readValue(el, w);
     const rnd = $(ctrlId(w) + "-random");
     if (rnd) values["random:" + key] = rnd.checked;
   }
-  store("values:" + wf.id, values);
+  store("values:" + wf.path, values);
 }
 
-async function loadWorkflow(id) {
+function applyOtherFilter() {
+  const q = ($("other-filter").value ?? "").toLowerCase();
+  for (const field of $("other-params-body").querySelectorAll(".field")) {
+    const lbl = field.querySelector("label")?.textContent.toLowerCase() ?? "";
+    field.hidden = q.length > 0 && !lbl.includes(q);
+  }
+}
+
+// ── Workflow picker ────────────────────────────────────────────────────────
+function buildPicker(workflows, activeCat, q) {
+  const cats = ["全部", ...new Set(workflows.map((w) => w.category).filter(Boolean))].sort();
+  const chips = $("picker-cats");
+  chips.textContent = "";
+  for (const cat of cats) {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.textContent = cat || "根目录";
+    btn.className = cat === activeCat ? "active" : "";
+    btn.onclick = () => buildPicker(workflows, cat, q);
+    chips.appendChild(btn);
+  }
+
+  const lq = q.toLowerCase();
+  const visible = workflows.filter((w) => {
+    const matchCat = !activeCat || activeCat === "全部" || w.category === activeCat;
+    const matchQ = !lq || w.name.toLowerCase().includes(lq) || (w.category || "").toLowerCase().includes(lq);
+    return matchCat && matchQ;
+  });
+
+  const list = $("picker-list");
+  list.textContent = "";
+  if (!visible.length) {
+    const li = document.createElement("li"); li.innerHTML = '<span class="empty">没有匹配的工作流</span>';
+    list.appendChild(li); return;
+  }
+  for (const wf of visible) {
+    const li = document.createElement("li");
+    if (state.workflow?.path === wf.path) li.classList.add("current");
+    li.innerHTML = `<span>${wf.name}</span>${wf.category ? `<span class="meta">${wf.category}</span>` : ""}`;
+    li.onclick = () => { closePicker(); loadWorkflow(wf.path); };
+    list.appendChild(li);
+  }
+}
+
+let pickerCat = "全部";
+function openPicker() {
+  buildPicker(state.workflows, pickerCat, "");
+  $("picker-search").value = "";
+  $("picker").hidden = false;
+  $("picker-search").focus();
+  document.addEventListener("keydown", onPickerKey);
+}
+function closePicker() {
+  $("picker").hidden = true;
+  document.removeEventListener("keydown", onPickerKey);
+}
+function onPickerKey(e) { if (e.key === "Escape") closePicker(); }
+
+$("picker-search").oninput = (e) => buildPicker(state.workflows, pickerCat, e.target.value);
+$("picker-close").onclick = closePicker;
+$("picker").onclick = (e) => { if (e.target === $("picker")) closePicker(); };
+$("workflow-btn").onclick = openPicker;
+
+// ── Workflow load ─────────────────────────────────────────────────────────
+async function loadWorkflow(path) {
   $("run-btn").disabled = true;
   setStatus("加载中…");
-  const res = await getJSON("/mobileui/api/workflows/" + encodeURIComponent(id));
-  if (!res.ok) {
-    setStatus((res.body && res.body.error) || "加载工作流失败", "error");
-    return;
-  }
-  state.workflow = res.body;
-  store("last", id);
-  renderForm(res.body);
+  let res;
+  try { res = await fetch("/webui/api/workflow?path=" + encodeURIComponent(path)); }
+  catch (e) { setStatus("网络错误：" + e.message, "error"); return; }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { setStatus((data.error ?? "加载工作流失败"), "error"); return; }
+  state.workflow = data;
+  store("last", path);
+  const { name, category } = state.workflows.find((w) => w.path === path) ?? {};
+  $("workflow-category").textContent = category ?? "";
+  $("workflow-name").textContent = name ?? path;
+  renderForm(data);
   setStatus("");
   $("run-btn").disabled = false;
 }
 
 async function loadList() {
   let res;
-  try {
-    res = await getJSON("/mobileui/api/workflows");
-  } catch (e) {
-    setStatus("无法连接 ComfyUI：" + e.message, "error");
+  try { res = await fetch("/webui/api/workflows"); }
+  catch (e) { setStatus("无法连接 ComfyUI：" + e.message, "error"); return; }
+  state.workflows = (await res.json().catch(() => []));
+  if (!state.workflows.length) {
+    setStatus("没有找到任何工作流。请在 ComfyUI 中保存至少一个工作流后刷新。", "error");
     return;
-  }
-  const list = res.body || [];
-  const sel = $("workflow-select");
-  sel.textContent = "";
-  if (!list.length) {
-    setStatus("workflows 目录中没有工作流。\n请在 ComfyUI 中用「导出 (API)」保存 JSON 到\ncustom_nodes/ComfyUI-MobileUI/workflows/", "error");
-    return;
-  }
-  for (const wf of list) {
-    const o = document.createElement("option");
-    o.value = wf.id;
-    o.textContent = wf.name;
-    sel.appendChild(o);
   }
   const last = store("last");
-  if (list.some((wf) => wf.id === last)) sel.value = last;
-  await loadWorkflow(sel.value);
+  const first = state.workflows.find((w) => w.path === last) ?? state.workflows[0];
+  if (first) await loadWorkflow(first.path);
+}
+
+// ── Submit / run ──────────────────────────────────────────────────────────
+// Same token rules as the frontend's formatDate / applyTextReplacements.
+function formatDate(fmt, d) {
+  const parts = { d: d.getDate(), M: d.getMonth() + 1, h: d.getHours(), m: d.getMinutes(), s: d.getSeconds() };
+  return fmt.replace(/dd?|MM?|hh?|mm?|ss?|yyy?y?/g, (t) => {
+    if (t === "yy") return String(d.getFullYear()).substring(2);
+    if (t === "yyyy") return String(d.getFullYear());
+    return t[0] in parts ? String(parts[t[0]]).padStart(t.length, "0") : t;
+  });
+}
+
+function applyTextReplacements(prompt, text) {
+  const now = new Date();
+  return text.replace(/%([^%]+)%/g, (match, token) => {
+    const split = token.split(".");
+    if (split.length !== 2) return split[0].startsWith("date:") ? formatDate(split[0].substring(5), now) : match;
+    const node = Object.values(prompt).find((n) => n._meta?.title === split[0]) ?? Object.values(prompt).find((n) => n.class_type === split[0]);
+    const value = node?.inputs[split[1]];
+    if (value === undefined || Array.isArray(value)) return match;
+    return String(value).replaceAll(/[/?<>\\:*|"\x00-\x1F\x7F]/g, "_");
+  });
 }
 
 function buildPrompt() {
   const wf = state.workflow;
-  const prompt = structuredClone(wf.prompt);
+  const prompt = JSON.parse(JSON.stringify(wf.prompt));
   for (const w of wf.widgets) {
-    const el = $(ctrlId(w));
+    const el = $(ctrlId(w)); if (!el) continue;
     const rnd = $(ctrlId(w) + "-random");
-    if (rnd && rnd.checked) el.value = randomSeed();
+    if (rnd?.checked) el.value = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     prompt[w.node_id].inputs[w.widget] = readValue(el, w);
+  }
+  for (const node of Object.values(prompt)) {
+    const prefix = node.inputs.filename_prefix;
+    if (typeof prefix === "string" && prefix.includes("%")) node.inputs.filename_prefix = applyTextReplacements(prompt, prefix);
   }
   saveForm();
   return prompt;
@@ -246,58 +301,52 @@ function buildPrompt() {
 function formatSubmitError(body) {
   if (!body) return "提交失败";
   const lines = [];
-  if (body.error) lines.push(body.error.message || String(body.error));
-  for (const [nodeId, ne] of Object.entries(body.node_errors || {})) {
-    for (const e of ne.errors || []) {
-      lines.push(`[${ne.class_type || nodeId}] ${e.message}${e.details ? "：" + e.details : ""}`);
-    }
+  if (body.error) lines.push(body.error.message ?? String(body.error));
+  for (const [id, ne] of Object.entries(body.node_errors ?? {})) {
+    for (const e of ne.errors ?? [])
+      lines.push(`[${ne.class_type ?? id}] ${e.message}${e.details ? "：" + e.details : ""}`);
   }
   return lines.join("\n") || "提交失败";
 }
 
-function setRunning(running) {
-  state.running = running;
-  const btn = $("run-btn");
-  btn.textContent = running ? "中断" : "生成";
-  btn.classList.toggle("stop", running);
-  $("workflow-select").disabled = running;
-  if (!running) {
-    state.promptId = null;
-    setProgress(null);
-  }
+function setRunning(on) {
+  state.running = on;
+  $("run-btn").textContent = on ? "中断" : "生成";
+  $("run-btn").classList.toggle("stop", on);
+  if (!on) { state.promptId = null; setProgress(null); }
 }
 
+// ── Preview and result display ────────────────────────────────────────────
 function showPreview(blob) {
   if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
   state.previewUrl = URL.createObjectURL(blob);
-  $("result").innerHTML = "";
-  const img = document.createElement("img");
-  img.src = state.previewUrl;
-  $("result").appendChild(img);
+  const prev = $("preview"); prev.hidden = false; prev.textContent = "";
+  const img = document.createElement("img"); img.src = state.previewUrl;
+  prev.appendChild(img);
 }
 
 function showImages(outputs) {
   const result = $("result");
-  result.innerHTML = "";
-  for (const out of Object.values(outputs || {})) {
-    for (const im of out.images || []) {
-      const params = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" });
+  result.textContent = "";
+  let first = true;
+  for (const out of Object.values(outputs ?? {})) {
+    for (const im of out.images ?? []) {
+      const params = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder ?? "", type: im.type ?? "output" });
       const url = "/api/view?" + params;
-      const a = document.createElement("a");
-      a.href = url;
-      a.target = "_blank";
+      const wrap = document.createElement("div");
+      if (first) { wrap.className = "latest"; first = false; }
       const img = document.createElement("img");
-      img.src = url;
-      img.loading = "lazy";
-      a.appendChild(img);
-      result.appendChild(a);
+      img.src = url; img.loading = "lazy";
+      img.onclick = () => openViewer(url);
+      wrap.appendChild(img); result.appendChild(wrap);
     }
   }
+  $("preview").hidden = true;
   return result.childElementCount;
 }
 
 function executionError(status) {
-  for (const [event, data] of (status && status.messages) || []) {
+  for (const [event, data] of (status?.messages ?? [])) {
     if (event === "execution_error") return `[${data.node_type}] ${data.exception_message}`;
     if (event === "execution_interrupted") return "已中断";
   }
@@ -308,19 +357,18 @@ async function pollHistory(promptId) {
   while (state.promptId === promptId) {
     let entry;
     try {
-      const res = await getJSON("/api/history/" + promptId);
-      entry = res.body && res.body[promptId];
-    } catch (e) { /* transient network error, keep polling */ }
-
-    if (entry && entry.status && entry.status.completed !== undefined) {
+      const r = await fetch("/api/history/" + promptId);
+      const h = await r.json().catch(() => ({}));
+      entry = h[promptId];
+    } catch (_) { /* transient; keep polling */ }
+    if (entry?.status?.completed !== undefined) {
       if (entry.status.status_str === "success") {
         const n = showImages(entry.outputs);
-        setStatus(n ? "完成" : "完成（没有图片输出，工作流中需要 SaveImage / PreviewImage 节点）", n ? "ok" : "error");
+        setStatus(n ? "完成" : "完成（没有图片输出，工作流需要 SaveImage 节点）", n ? "ok" : "error");
       } else {
         setStatus(executionError(entry.status), "error");
       }
-      setRunning(false);
-      return;
+      setRunning(false); return;
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -328,50 +376,43 @@ async function pollHistory(promptId) {
 
 async function run() {
   if (state.running) {
-    const promptId = state.promptId;
-    if (!promptId) return;
+    const pid = state.promptId; if (!pid) return;
     const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    // /interrupt only affects the running prompt; also drop it if it is still queued.
-    await post("/api/queue", { delete: [promptId] });
-    await post("/api/interrupt", { prompt_id: promptId });
-    const queue = await getJSON("/api/queue");
-    const pending = (queue.body && queue.body.queue_pending) || [];
-    const running = (queue.body && queue.body.queue_running) || [];
-    if (![...pending, ...running].some((item) => item[1] === promptId)) {
-      // Removed before it started: no history entry will ever appear.
-      setRunning(false);
-      setStatus("已取消");
-    } else {
-      setStatus("正在中断…");
-    }
+    await post("/api/queue", { delete: [pid] });
+    await post("/api/interrupt", { prompt_id: pid });
+    const q = await fetch("/api/queue").then((r) => r.json()).catch(() => ({}));
+    const all = [...(q.queue_running ?? []), ...(q.queue_pending ?? [])];
+    if (!all.some((item) => item[1] === pid)) { setRunning(false); setStatus("已取消"); }
+    else setStatus("正在中断…");
     return;
   }
-
-  setRunning(true);
-  setStatus("提交中…");
-  let res;
+  setRunning(true); setStatus("提交中…");
+  let res, body;
   try {
-    res = await getJSON("/api/prompt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: buildPrompt(), client_id: clientId }),
-    });
-  } catch (e) {
-    setRunning(false);
-    setStatus("网络错误：" + e.message, "error");
-    return;
-  }
-  if (!res.ok) {
-    setRunning(false);
-    setStatus(formatSubmitError(res.body), "error");
-    return;
-  }
-  state.promptId = res.body.prompt_id;
-  setStatus("排队中…");
-  setProgress(0);
+    res = await fetch("/api/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: buildPrompt(), client_id: clientId }) });
+    body = await res.json().catch(() => ({}));
+  } catch (e) { setRunning(false); setStatus("网络错误：" + e.message, "error"); return; }
+  if (!res.ok) { setRunning(false); setStatus(formatSubmitError(body), "error"); return; }
+  state.promptId = body.prompt_id;
+  setStatus("排队中…"); setProgress(0);
+  $("result").textContent = "";
   pollHistory(state.promptId);
 }
 
+// ── Image viewer ──────────────────────────────────────────────────────────
+function openViewer(url) {
+  $("viewer-img").src = url;
+  $("viewer").hidden = false;
+  document.addEventListener("keydown", onViewerKey);
+}
+function closeViewer() {
+  $("viewer").hidden = true;
+  document.removeEventListener("keydown", onViewerKey);
+}
+function onViewerKey(e) { if (e.key === "Escape") closeViewer(); }
+$("viewer").onclick = closeViewer;
+
+// ── WebSocket ─────────────────────────────────────────────────────────────
 function connectSocket() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws?clientId=${clientId}`);
@@ -379,7 +420,6 @@ function connectSocket() {
   ws.onmessage = (ev) => {
     if (!state.running) return;
     if (typeof ev.data !== "string") {
-      // Binary event 1 = preview image: [event u32][image type u32][bytes]
       const view = new DataView(ev.data);
       if (view.getUint32(0) === 1) {
         const mime = view.getUint32(4) === 2 ? "image/png" : "image/jpeg";
@@ -387,12 +427,10 @@ function connectSocket() {
       }
       return;
     }
-    const msg = JSON.parse(ev.data);
-    const data = msg.data || {};
+    const msg = JSON.parse(ev.data); const data = msg.data ?? {};
     if (data.prompt_id && data.prompt_id !== state.promptId) return;
-    if (msg.type === "execution_start") {
-      setStatus("运行中…");
-    } else if (msg.type === "progress") {
+    if (msg.type === "execution_start") setStatus("运行中…");
+    else if (msg.type === "progress") {
       setProgress(data.value / data.max);
       setStatus(`运行中… ${data.value}/${data.max}`);
     }
@@ -400,9 +438,10 @@ function connectSocket() {
   ws.onclose = () => setTimeout(connectSocket, 2000);
 }
 
-$("workflow-select").onchange = (e) => loadWorkflow(e.target.value);
+// ── Wire-up ───────────────────────────────────────────────────────────────
 $("params-form").addEventListener("change", saveForm);
 $("run-btn").onclick = run;
+$("other-filter").oninput = applyOtherFilter;
 
 connectSocket();
 loadList();
