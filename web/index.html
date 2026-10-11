@@ -64,6 +64,14 @@
           <div class="section-label">参数</div>
           <div id="common-params" class="grid"></div>
         </div>
+        <div id="lora-wrap" hidden>
+          <div class="section-label">LoRA <span id="lora-count" class="count"></span></div>
+          <div id="lora-params"></div>
+        </div>
+        <div id="output-wrap" hidden>
+          <div class="section-label">输出</div>
+          <div id="output-params"></div>
+        </div>
         <details id="other-params" hidden>
           <summary class="section-label">
             <svg class="i-sm"><use href="#i-chevron"/></svg>
@@ -104,6 +112,7 @@
           <span class="bar"><span id="overlay-bar"></span></span>
         </div>
       </div>
+      <div id="run-outputs" class="run-outputs" hidden></div>
       <div class="history" id="history-wrap" hidden>
         <div class="history-head">
           <span>历史</span>

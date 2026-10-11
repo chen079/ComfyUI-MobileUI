@@ -230,6 +230,50 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 .seed-random input.switch::after { width: 13px; height: 13px; }
 .seed-random input.switch:checked::after { transform: translateX(13px); }
 
+/* Node cards (LoRA loaders, other params) */
+.node-card {
+  margin-bottom: 10px;
+  padding: 10px 12px 0;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.node-card-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12.5px; font-weight: 600;
+  color: var(--text);
+}
+.node-card-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node-card.lora .node-card-head::before {
+  content: ""; flex-shrink: 0;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+}
+.node-card.output .node-card-head::before {
+  content: ""; flex-shrink: 0;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ok);
+}
+.node-badge {
+  margin-left: auto; flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 11px; font-weight: 600;
+  border-radius: 999px;
+}
+.node-badge.save { background: color-mix(in oklch, var(--ok) 15%, transparent); color: var(--ok); }
+.node-badge.preview { background: var(--accent-soft); color: var(--accent-text); }
+.node-card-note {
+  grid-column: 1 / -1;
+  margin: 0 0 12px;
+  font-size: 12.5px; color: var(--muted);
+  padding: 8px 10px;
+  background: color-mix(in oklch, var(--surface) 80%, transparent);
+  border-radius: var(--r-sm);
+}
+.node-card .field { margin-bottom: 12px; }
+.node-card input:not([type=checkbox]), .node-card select, .node-card textarea, .node-card .field.check { background: var(--surface); }
+
 /* Other params */
 details { margin-top: 4px; }
 details > summary { list-style: none; cursor: pointer; user-select: none; }
@@ -344,6 +388,13 @@ body[data-tab="result"] .tabs [data-tab="result"] { background: var(--surface); 
 #overlay-bar { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width 0.3s ease; }
 .spinner { width: 14px; height: 14px; flex-shrink: 0; border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.run-outputs { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; }
+.out-group { padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); }
+.out-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12.5px; font-weight: 600; }
+.out-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.out-group-head .node-badge { margin-left: 0; }
+.out-group .history-strip { padding-bottom: 0; }
 
 .history { padding: 14px 0 16px; }
 .history-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }

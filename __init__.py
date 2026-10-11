@@ -4,6 +4,8 @@ import os
 from aiohttp import web
 from server import PromptServer  # type: ignore
 
+import nodes
+
 from .convert import input_schema, schema_inputs, workflow_to_prompt
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
@@ -123,6 +125,24 @@ def _derive_widgets(prompt):
     return widgets
 
 
+def _image_outputs(prompt):
+    # Output nodes that take images: SaveImage-like ones have a filename_prefix, the rest only preview.
+    out = []
+    for node_id, node in prompt.items():
+        cls = nodes.NODE_CLASS_MAPPINGS.get(node["class_type"])
+        if cls is None or not getattr(cls, "OUTPUT_NODE", False):
+            continue
+        schema = schema_inputs(input_schema(node["class_type"]) or {})
+        if not any(isinstance(spec, (list, tuple)) and spec and spec[0] == "IMAGE" for spec in schema.values()):
+            continue
+        out.append({
+            "node_id": node_id,
+            "title": node["_meta"]["title"],
+            "kind": "save" if "filename_prefix" in schema else "preview",
+        })
+    return out
+
+
 def _add_routes():
     app = PromptServer.instance.app
 
@@ -159,6 +179,7 @@ def _add_routes():
             "path": path,
             "prompt": prompt,
             "widgets": _derive_widgets(prompt),
+            "outputs": _image_outputs(prompt),
         })
 
     app.router.add_routes([

@@ -8,6 +8,9 @@ const LABELS = {
   width: "宽度", height: "高度", batch_size: "批次",
   ckpt_name: "模型", unet_name: "模型",
 };
+const LORA_LABELS = {
+  lora_name: "LoRA 文件", strength_model: "模型强度", strength_clip: "CLIP 强度", strength: "强度",
+};
 const STORE_NS = "comfywebui:";
 
 const clientId = (crypto.randomUUID ? crypto.randomUUID() : Array.from({ length: 4 }, () =>
@@ -15,7 +18,7 @@ const clientId = (crypto.randomUUID ? crypto.randomUUID() : Array.from({ length:
 
 const state = {
   workflow: null, promptId: null, running: false,
-  previewUrl: null, workflows: [], historyImgs: store("history") ?? [], historyIdx: 0,
+  previewUrl: null, workflows: [], historyImgs: store("history") ?? [], canvasList: null,
 };
 
 // ── Storage ────────────────────────────────────────────────────────────────
@@ -146,28 +149,112 @@ function makeField(w, label) {
 }
 
 // ── Form render ────────────────────────────────────────────────────────────
+function loraLabel(value) {
+  const base = String(value ?? "").split(/[\\/]/).pop();
+  return base.replace(/\.(safetensors|ckpt|pt|bin)$/i, "") || "LoRA";
+}
+
+// One card per node so parameters of repeated nodes (several LoRA loaders, etc.) stay together.
+function makeNodeCard(title, extraClass) {
+  const card = document.createElement("div");
+  card.className = "node-card" + (extraClass ? " " + extraClass : "");
+  const head = document.createElement("div");
+  head.className = "node-card-head";
+  const name = document.createElement("span");
+  name.className = "node-card-title";
+  name.textContent = title;
+  head.appendChild(name);
+  const body = document.createElement("div");
+  body.className = "grid";
+  card.append(head, body);
+  return { card, head, name, body };
+}
+
+function outputBadge(kind) {
+  const badge = document.createElement("span");
+  badge.className = "node-badge " + kind;
+  badge.textContent = kind === "save" ? "保存" : "预览";
+  return badge;
+}
+
+function groupByNode(widgets) {
+  const nodes = new Map();
+  for (const w of widgets) {
+    if (!nodes.has(w.node_id)) nodes.set(w.node_id, []);
+    nodes.get(w.node_id).push(w);
+  }
+  return nodes;
+}
+
 function renderForm(wf) {
   $("prompt-params").textContent = "";
   $("common-params").textContent = "";
+  $("lora-params").textContent = "";
+  $("run-outputs").textContent = "";
+  $("run-outputs").hidden = true;
   $("other-params-body").textContent = "";
 
   const saved = store("values:" + wf.path) ?? {};
+  const outputNodes = wf.outputs ?? [];
+  const outputIds = new Set(outputNodes.map((o) => o.node_id));
+  const loraNodes = new Set(wf.widgets.filter((w) => w.widget === "lora_name").map((w) => w.node_id));
+  const groupOf = (w) => (outputIds.has(w.node_id) ? "output" : loraNodes.has(w.node_id) ? "lora" : w.group);
+
   const counts = {};
   for (const w of wf.widgets) {
-    const key = w.group === "common" ? w.widget : w.group;
+    const key = groupOf(w) === "common" ? w.widget : groupOf(w);
     counts[key] = (counts[key] ?? 0) + 1;
   }
   const suffix = (key, w) => counts[key] > 1 ? " · " + w.title : "";
 
-  let otherCount = 0;
-  for (const w of wf.widgets) {
-    let target, label;
-    if (w.group === "positive")      { target = $("prompt-params");   label = "正向提示词" + suffix("positive", w); }
-    else if (w.group === "negative") { target = $("prompt-params");   label = "负向提示词" + suffix("negative", w); }
-    else if (w.group === "common")   { target = $("common-params");   label = (LABELS[w.widget] ?? w.widget) + suffix(w.widget, w); }
-    else                             { target = $("other-params-body"); label = (w.title !== w.widget ? w.title + " · " : "") + w.widget; otherCount++; }
-    target.appendChild(makeField(w, label));
+  const prompts = wf.widgets.filter((w) => w.group === "positive" || w.group === "negative")
+    .sort((a, b) => (a.group === "positive" ? 0 : 1) - (b.group === "positive" ? 0 : 1));
+  for (const w of prompts)
+    $("prompt-params").appendChild(makeField(w, (w.group === "positive" ? "正向提示词" : "负向提示词") + suffix(w.group, w)));
+
+  for (const w of wf.widgets)
+    if (groupOf(w) === "common") $("common-params").appendChild(makeField(w, (LABELS[w.widget] ?? w.widget) + suffix(w.widget, w)));
+
+  const loras = groupByNode(wf.widgets.filter((w) => groupOf(w) === "lora"));
+  for (const widgets of loras.values()) {
+    const nameWidget = widgets.find((w) => w.widget === "lora_name");
+    const { card, name, body } = makeNodeCard(loraLabel(saved[nameWidget.node_id + "/lora_name"] ?? nameWidget.value), "lora");
+    for (const w of widgets) {
+      const field = makeField(w, LORA_LABELS[w.widget] ?? w.widget);
+      if (w.widget === "lora_name") {
+        field.classList.add("wide");
+        field.querySelector("select").addEventListener("change", (e) => { name.textContent = loraLabel(e.target.value); });
+      }
+      body.appendChild(field);
+    }
+    $("lora-params").appendChild(card);
   }
+  $("lora-wrap").hidden = !loras.size;
+  $("lora-count").textContent = loras.size > 1 ? loras.size : "";
+
+  const others = groupByNode(wf.widgets.filter((w) => groupOf(w) === "other"));
+  let otherCount = 0;
+  for (const widgets of others.values()) {
+    const { card, body } = makeNodeCard(widgets[0].title);
+    for (const w of widgets) { body.appendChild(makeField(w, w.widget)); otherCount++; }
+    $("other-params-body").appendChild(card);
+  }
+
+  $("output-params").textContent = "";
+  for (const out of outputNodes) {
+    const { card, head, body } = makeNodeCard(out.title, "output");
+    head.appendChild(outputBadge(out.kind));
+    for (const w of wf.widgets.filter((w) => w.node_id === out.node_id))
+      body.appendChild(makeField(w, w.widget === "filename_prefix" ? "文件名前缀" : w.widget));
+    if (!body.childElementCount) {
+      const note = document.createElement("p");
+      note.className = "node-card-note wide";
+      note.textContent = out.kind === "save" ? "保存到 output 目录" : "仅预览，不保存到 output 目录";
+      body.appendChild(note);
+    }
+    $("output-params").appendChild(card);
+  }
+  $("output-wrap").hidden = !outputNodes.length;
 
   $("other-params").hidden = !otherCount;
   $("other-count").textContent = otherCount || "";
@@ -198,9 +285,15 @@ function saveForm() {
 
 function applyOtherFilter() {
   const q = ($("other-filter").value ?? "").toLowerCase();
-  for (const field of $("other-params-body").querySelectorAll(".field")) {
-    const lbl = field.querySelector("label")?.textContent.toLowerCase() ?? "";
-    field.hidden = q.length > 0 && !lbl.includes(q);
+  for (const card of $("other-params-body").querySelectorAll(".node-card")) {
+    const titleMatch = card.querySelector(".node-card-title").textContent.toLowerCase().includes(q);
+    let any = false;
+    for (const field of card.querySelectorAll(".field")) {
+      const lbl = field.querySelector("label")?.textContent.toLowerCase() ?? "";
+      field.hidden = !titleMatch && !lbl.includes(q);
+      any ||= !field.hidden;
+    }
+    card.hidden = !any;
   }
 }
 
@@ -375,16 +468,16 @@ function showPreview(blob) {
   showOverlay($("overlay-text").textContent, null);
 }
 
-function showMainImage(url) {
+function showMainImage(url, list) {
   const img = $("canvas-img");
   img.src = url; img.className = ""; img.hidden = false;
   $("canvas-empty").hidden = true;
+  state.canvasList = list;
 }
 
 const HISTORY_MAX = 60;
 function pushHistory(urls) {
   state.historyImgs = [...urls, ...state.historyImgs.filter((u) => !urls.includes(u))].slice(0, HISTORY_MAX);
-  state.historyIdx = 0;
   store("history", state.historyImgs);
   renderHistory();
 }
@@ -394,18 +487,19 @@ function renderHistory() {
   $("history-wrap").hidden = !state.historyImgs.length;
   state.historyImgs.forEach((url, i) => {
     const btn = document.createElement("button");
-    btn.type = "button"; if (i === state.historyIdx) btn.classList.add("active");
+    btn.type = "button"; if (url === $("canvas-img").getAttribute("src")) btn.classList.add("active");
     const img = document.createElement("img"); img.src = url; img.loading = "lazy";
     btn.appendChild(img);
-    btn.onclick = () => { state.historyIdx = i; showMainImage(url); renderHistory(); };
+    btn.onclick = () => { showMainImage(url, state.historyImgs); renderHistory(); $("run-outputs").querySelectorAll("button").forEach((b) => b.classList.remove("active")); };
     strip.appendChild(btn);
   });
 }
 
-$("history-clear").onclick = () => { state.historyImgs = []; state.historyIdx = 0; store("history", []); renderHistory(); showCanvasEmpty(); };
+$("history-clear").onclick = () => { state.historyImgs = []; store("history", []); renderHistory(); };
 $("canvas-img").onclick = () => {
   if ($("canvas-img").classList.contains("preview")) return;
-  openViewer(state.historyImgs[state.historyIdx], state.historyImgs);
+  const url = $("canvas-img").getAttribute("src");
+  openViewer(url, state.canvasList?.includes(url) ? state.canvasList : [url]);
 };
 
 // ── Viewer ─────────────────────────────────────────────────────────────────
@@ -439,18 +533,60 @@ $("viewer-prev").onclick = (e) => { e.stopPropagation(); viewerIdx = (viewerIdx 
 $("viewer-next").onclick = (e) => { e.stopPropagation(); viewerIdx = (viewerIdx + 1) % viewerUrls.length; updateViewer(); };
 
 // ── Results ────────────────────────────────────────────────────────────────
-function showImages(outputs) {
-  const allUrls = [];
-  for (const out of Object.values(outputs ?? {}))
-    for (const im of out.images ?? []) {
-      const params = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder ?? "", type: im.type ?? "output" });
-      allUrls.push("/api/view?" + params);
+// Group a run's images by the output node that produced them, in workflow order.
+function groupOutputs(outputs) {
+  const known = state.workflow?.outputs ?? [];
+  const order = new Map(known.map((o, i) => [o.node_id, i]));
+  const groups = [];
+  for (const [nodeId, out] of Object.entries(outputs ?? {})) {
+    const images = out.images ?? [];
+    if (!images.length) continue;
+    const meta = known.find((o) => o.node_id === nodeId);
+    groups.push({
+      title: meta?.title ?? state.workflow?.prompt[nodeId]?._meta?.title ?? nodeId,
+      kind: meta?.kind ?? (images[0].type === "output" ? "save" : "preview"),
+      urls: images.map((im) => "/api/view?" + new URLSearchParams({ filename: im.filename, subfolder: im.subfolder ?? "", type: im.type ?? "output" })),
+      order: order.get(nodeId) ?? Infinity,
+    });
+  }
+  return groups.sort((a, b) => a.order - b.order);
+}
+
+function renderRunOutputs(groups, current) {
+  const wrap = $("run-outputs"); wrap.textContent = "";
+  const runUrls = groups.flatMap((g) => g.urls);
+  for (const g of groups) {
+    const group = document.createElement("div"); group.className = "out-group";
+    const head = document.createElement("div"); head.className = "out-group-head";
+    const title = document.createElement("span"); title.className = "out-group-title"; title.textContent = g.title;
+    const count = document.createElement("span"); count.className = "count"; count.textContent = g.urls.length > 1 ? g.urls.length : "";
+    head.append(title, outputBadge(g.kind), count);
+    const thumbs = document.createElement("div"); thumbs.className = "history-strip";
+    for (const url of g.urls) {
+      const btn = document.createElement("button"); btn.type = "button";
+      if (url === current) btn.classList.add("active");
+      const img = document.createElement("img"); img.src = url; img.loading = "lazy";
+      btn.appendChild(img);
+      btn.onclick = () => { showMainImage(url, runUrls); renderRunOutputs(groups, url); renderHistory(); };
+      thumbs.appendChild(btn);
     }
-  if (!allUrls.length) return 0;
-  showMainImage(allUrls[0]);
-  pushHistory(allUrls);
+    group.append(head, thumbs);
+    wrap.appendChild(group);
+  }
+  wrap.hidden = !groups.length;
+}
+
+function showImages(outputs) {
+  const groups = groupOutputs(outputs);
+  if (!groups.length) return 0;
+  const runUrls = groups.flatMap((g) => g.urls);
+  const main = (groups.find((g) => g.kind === "save") ?? groups[0]).urls[0];
+  showMainImage(main, runUrls);
+  // Preview images live in temp/, which ComfyUI clears on restart, so only saved images are kept in history.
+  pushHistory(groups.filter((g) => g.kind === "save").flatMap((g) => g.urls));
+  renderRunOutputs(groups, main);
   if (document.body.dataset.tab !== "result") $("tab-dot").hidden = false;
-  return allUrls.length;
+  return runUrls.length;
 }
 
 // ── Execution error ────────────────────────────────────────────────────────
@@ -547,7 +683,7 @@ $("params-form").addEventListener("change", saveForm);
 $("run-btn").onclick = run;
 $("other-filter").oninput = applyOtherFilter;
 
+if (state.historyImgs.length) showMainImage(state.historyImgs[0], state.historyImgs);
 renderHistory();
-if (state.historyImgs.length) showMainImage(state.historyImgs[0]);
 connectSocket();
 loadList();
