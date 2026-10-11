@@ -18,7 +18,7 @@
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/MIVIUS-s/ComfyUI-MobileUI.git
+git clone https://github.com/chen079/ComfyUI-MobileUI.git
 ```
 
 重启 ComfyUI。
