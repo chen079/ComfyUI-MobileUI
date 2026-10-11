@@ -125,12 +125,19 @@ function renderForm(wf) {
   $("other-params-body").textContent = "";
 
   const saved = store("values:" + wf.path) ?? {};
+  const counts = {};
+  for (const w of wf.widgets) {
+    const key = w.group === "common" ? w.widget : w.group;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  // Workflows with several samplers or prompts get the node title appended to tell them apart.
+  const suffix = (key, w) => (counts[key] > 1 ? " · " + w.title : "");
 
   for (const w of wf.widgets) {
     let target, label;
-    if (w.group === "positive") { target = $("prompt-params"); label = "正向提示词"; }
-    else if (w.group === "negative") { target = $("prompt-params"); label = "负向提示词"; }
-    else if (w.group === "common") { target = $("common-params"); label = LABELS[w.widget] ?? w.widget; }
+    if (w.group === "positive") { target = $("prompt-params"); label = "正向提示词" + suffix("positive", w); }
+    else if (w.group === "negative") { target = $("prompt-params"); label = "负向提示词" + suffix("negative", w); }
+    else if (w.group === "common") { target = $("common-params"); label = (LABELS[w.widget] ?? w.widget) + suffix(w.widget, w); }
     else { target = $("other-params-body"); label = (w.title !== w.widget ? w.title + " · " : "") + w.widget; }
     target.appendChild(makeField(w, label));
   }

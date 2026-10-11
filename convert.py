@@ -244,7 +244,8 @@ def _convert_scope(scope, prompt):
         inputs = _widget_values(node, schema)
         for inp in node.get("inputs", []):
             name = inp.get("name")
-            if inp.get("link") is None or name not in schema:
+            # Dynamic inputs such as "values.a" belong to the declared input "values".
+            if inp.get("link") is None or name.split(".", 1)[0] not in schema:
                 continue
             resolved = _resolve_link(scope, inp["link"])
             if resolved is _NO_LINK:

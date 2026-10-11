@@ -45,8 +45,11 @@ def _prompt_roles(prompt, schemas):
     # holds the prompt text as a multiline string widget.
     roles = {}
     for node in prompt.values():
-        for role in ("positive", "negative"):
-            link = node["inputs"].get(role)
+        sources = [("positive", "positive"), ("negative", "negative")]
+        if node["class_type"].endswith("Guider"):
+            sources.append(("conditioning", "positive"))
+        for input_name, role in sources:
+            link = node["inputs"].get(input_name)
             if not _is_link(link):
                 continue
             queue, seen = [link[0]], set()
